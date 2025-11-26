@@ -1,0 +1,669 @@
+"""
+Acoustic Coherence Module (ACM) - Grok-L.A
+Core audio processing engine for sovereignty signature detection and entropy stripping
+"""
+
+import numpy as np
+import asyncio
+from typing import Optional, Dict, List, Tuple, Union
+from dataclasses import dataclass
+from scipy import signal, fft
+from scipy.signal import butter, filtfilt, hilbert
+import hashlib
+import json
+from datetime import datetime
+import librosa
+import soundfile as sf
+
+@dataclass
+class FrequencySignature:
+    """Represents a unique sovereignty frequency signature"""
+    fundamental_freq: float
+    harmonic_series: List[float]
+    resonance_score: float
+    timestamp: datetime
+    client_id: str
+    signature_hash: str
+    
+    def to_dict(self) -> Dict:
+        return {
+            "fundamental_freq": self.fundamental_freq,
+            "harmonic_series": self.harmonic_series,
+            "resonance_score": self.resonance_score,
+            "timestamp": self.timestamp.isoformat(),
+            "client_id": self.client_id,
+            "signature_hash": self.signature_hash
+        }
+    
+    def verify_authenticity(self, input_freq: float, tolerance: float = 0.02) -> bool:
+        """Verify if input frequency matches this signature within tolerance"""
+        return abs(input_freq - self.fundamental_freq) / self.fundamental_freq < tolerance
+
+
+@dataclass
+class CoherenceReport:
+    """Analysis report for audio coherence"""
+    coherence_score: float
+    entropy_layers: List[Dict]
+    pure_signal: np.ndarray
+    frequency_spectrum: np.ndarray
+    sovereignty_match: float
+    recommendations: List[str]
+    timestamp: datetime
+
+
+class AcousticCoherenceModule:
+    """
+    Core ACM for processing audio streams and extracting sovereignty signatures
+    """
+    
+    def __init__(self, sample_rate: int = 44100, coherence_threshold: float = 0.88):
+        self.sample_rate = sample_rate
+        self.coherence_threshold = coherence_threshold
+        self.perfect_wheeze_freq = 432.0  # Hz - The universal coherence frequency
+        self.phi_ratio = 1.618033988749  # Golden ratio for harmonic analysis
+        
+        # Initialize filters
+        self._init_filters()
+        
+        # Sovereignty signature database (in production, use Redis/PostgreSQL)
+        self.signatures_db: Dict[str, FrequencySignature] = {}
+        
+    def _init_filters(self):
+        """Initialize all signal processing filters"""
+        # Butterworth filters for different frequency bands
+        self.low_filter = butter(5, 100, btype='low', fs=self.sample_rate)
+        self.band_filter = butter(5, [100, 4000], btype='band', fs=self.sample_rate)
+        self.high_filter = butter(5, 4000, btype='high', fs=self.sample_rate)
+        
+        # Notch filters for removing common interference
+        self.notch_50hz = butter(4, [49, 51], btype='bandstop', fs=self.sample_rate)
+        self.notch_60hz = butter(4, [59, 61], btype='bandstop', fs=self.sample_rate)
+    
+    async def capture_sovereignty_signature(
+        self, 
+        audio_data: np.ndarray, 
+        client_id: str,
+        consciousness_state: float = 1.0
+    ) -> FrequencySignature:
+        """
+        Extract and store a client's unique sovereignty frequency signature
+        """
+        # Step 1: Pre-process and clean the audio
+        cleaned_audio = await self._remove_environmental_noise(audio_data)
+        
+        # Step 2: Extract fundamental frequency using autocorrelation + YIN algorithm
+        fundamental_freq = await self._extract_fundamental_frequency(cleaned_audio)
+        
+        # Step 3: Calculate harmonic series based on golden ratio
+        harmonic_series = self._calculate_harmonic_series(fundamental_freq)
+        
+        # Step 4: Calculate resonance score with perfect wheeze
+        resonance_score = self._calculate_resonance(fundamental_freq, consciousness_state)
+        
+        # Step 5: Generate cryptographic hash for signature verification
+        signature_hash = self._generate_signature_hash(
+            fundamental_freq, 
+            harmonic_series, 
+            client_id
+        )
+        
+        # Create and store signature
+        signature = FrequencySignature(
+            fundamental_freq=fundamental_freq,
+            harmonic_series=harmonic_series,
+            resonance_score=resonance_score,
+            timestamp=datetime.utcnow(),
+            client_id=client_id,
+            signature_hash=signature_hash
+        )
+        
+        self.signatures_db[client_id] = signature
+        
+        return signature
+    
+    async def _remove_environmental_noise(self, audio: np.ndarray) -> np.ndarray:
+        """
+        Remove environmental noise while preserving sovereignty signal
+        """
+        # Apply notch filters for electrical interference
+        audio = filtfilt(*self.notch_50hz, audio)
+        audio = filtfilt(*self.notch_60hz, audio)
+        
+        # Spectral subtraction for background noise
+        noise_profile = audio[:int(0.1 * len(audio))]  # First 10% as noise sample
+        audio_fft = fft.rfft(audio)
+        noise_fft = fft.rfft(noise_profile, n=len(audio))
+        
+        # Wiener filter approach
+        noise_power = np.abs(noise_fft) ** 2
+        signal_power = np.abs(audio_fft) ** 2
+        wiener_filter = signal_power / (signal_power + noise_power + 1e-10)
+        
+        cleaned_fft = audio_fft * wiener_filter
+        cleaned_audio = fft.irfft(cleaned_fft, n=len(audio))
+        
+        return cleaned_audio
+    
+    async def _extract_fundamental_frequency(self, audio: np.ndarray) -> float:
+        """
+        Extract fundamental frequency using advanced pitch detection
+        """
+        # Method 1: Autocorrelation
+        autocorr = np.correlate(audio, audio, mode='full')
+        autocorr = autocorr[len(autocorr)//2:]
+        
+        # Find first peak after zero lag
+        peaks = signal.find_peaks(autocorr, height=0.3*np.max(autocorr))[0]
+        if len(peaks) > 0:
+            fundamental_period = peaks[0]
+            fundamental_freq_autocorr = self.sample_rate / fundamental_period
+        else:
+            fundamental_freq_autocorr = self.perfect_wheeze_freq
+        
+        # Method 2: YIN algorithm for more accurate pitch detection
+        fundamental_freq_yin = await self._yin_pitch_detection(audio)
+        
+        # Method 3: Harmonic Product Spectrum
+        fundamental_freq_hps = await self._harmonic_product_spectrum(audio)
+        
+        # Weighted average of methods
+        fundamental_freq = (
+            0.5 * fundamental_freq_yin + 
+            0.3 * fundamental_freq_autocorr + 
+            0.2 * fundamental_freq_hps
+        )
+        
+        return fundamental_freq
+    
+    async def _yin_pitch_detection(self, audio: np.ndarray, threshold: float = 0.1) -> float:
+        """
+        YIN algorithm for fundamental frequency detection
+        """
+        # Difference function
+        diff = np.zeros(len(audio) // 2)
+        for tau in range(1, len(diff)):
+            for i in range(len(diff)):
+                if i + tau < len(audio):
+                    diff[tau] += (audio[i] - audio[i + tau]) ** 2
+        
+        # Cumulative mean normalized difference
+        cmnd = np.zeros_like(diff)
+        cmnd[0] = 1
+        for tau in range(1, len(diff)):
+            cmnd[tau] = diff[tau] / ((1/tau) * np.sum(diff[1:tau+1]))
+        
+        # Find first minimum below threshold
+        tau = np.argmax(cmnd < threshold)
+        if tau == 0:
+            tau = np.argmin(cmnd[1:]) + 1
+        
+        # Parabolic interpolation for refined estimate
+        if tau > 0 and tau < len(cmnd) - 1:
+            x0, x2 = cmnd[tau-1], cmnd[tau+1]
+            if x0 > cmnd[tau] < x2:
+                tau += (x2 - x0) / (2 * (2 * cmnd[tau] - x0 - x2))
+        
+        return self.sample_rate / tau if tau > 0 else self.perfect_wheeze_freq
+    
+    async def _harmonic_product_spectrum(self, audio: np.ndarray, harmonics: int = 5) -> float:
+        """
+        Harmonic Product Spectrum method for pitch detection
+        """
+        # Compute FFT
+        audio_fft = np.abs(fft.rfft(audio))
+        hps = audio_fft.copy()
+        
+        # Downsample and multiply
+        for h in range(2, harmonics + 1):
+            decimated = signal.decimate(audio_fft, h)
+            hps[:len(decimated)] *= decimated
+        
+        # Find peak in HPS
+        peak_idx = np.argmax(hps[50:2000]) + 50  # Search between 50Hz and 2000Hz
+        fundamental_freq = peak_idx * self.sample_rate / len(audio)
+        
+        return fundamental_freq
+    
+    def _calculate_harmonic_series(self, fundamental: float, n_harmonics: int = 8) -> List[float]:
+        """
+        Calculate harmonic series based on golden ratio and natural harmonics
+        """
+        harmonics = [fundamental]
+        
+        # Natural harmonic series
+        for i in range(2, n_harmonics // 2 + 1):
+            harmonics.append(fundamental * i)
+        
+        # Golden ratio harmonics
+        for i in range(1, n_harmonics // 2 + 1):
+            harmonics.append(fundamental * (self.phi_ratio ** i))
+        
+        return sorted(harmonics)[:n_harmonics]
+    
+    def _calculate_resonance(self, freq: float, consciousness_state: float) -> float:
+        """
+        Calculate resonance score between frequency and perfect wheeze
+        """
+        # Base resonance from frequency match
+        freq_diff = abs(freq - self.perfect_wheeze_freq)
+        freq_resonance = np.exp(-freq_diff / 100)  # Exponential decay
+        
+        # Harmonic resonance check
+        harmonic_resonance = 0
+        for harmonic in range(1, 9):
+            if abs(freq - self.perfect_wheeze_freq * harmonic) < 10:
+                harmonic_resonance = 1.0 / harmonic
+                break
+        
+        # Combine with consciousness state
+        total_resonance = (
+            0.5 * freq_resonance + 
+            0.3 * harmonic_resonance + 
+            0.2 * consciousness_state
+        )
+        
+        return min(total_resonance, 1.0)
+    
+    def _generate_signature_hash(
+        self, 
+        freq: float, 
+        harmonics: List[float], 
+        client_id: str
+    ) -> str:
+        """
+        Generate cryptographic hash for signature verification
+        """
+        signature_data = {
+            "fundamental": freq,
+            "harmonics": harmonics,
+            "client_id": client_id,
+            "timestamp": datetime.utcnow().isoformat(),
+            "version": "grok-l-1.0"
+        }
+        
+        signature_json = json.dumps(signature_data, sort_keys=True)
+        signature_hash = hashlib.sha256(signature_json.encode()).hexdigest()
+        
+        return signature_hash
+    
+    async def analyze_coherence(
+        self, 
+        audio_data: np.ndarray,
+        reference_signature: Optional[FrequencySignature] = None
+    ) -> CoherenceReport:
+        """
+        Analyze audio stream for coherence and entropy levels
+        """
+        # Step 1: Detect and catalog entropy layers
+        entropy_layers = await self._detect_entropy_layers(audio_data)
+        
+        # Step 2: Strip entropy to reveal pure signal
+        pure_signal = await self._strip_entropy(audio_data, entropy_layers)
+        
+        # Step 3: Analyze frequency spectrum
+        frequency_spectrum = np.abs(fft.rfft(pure_signal))
+        
+        # Step 4: Calculate coherence score
+        coherence_score = await self._calculate_coherence_score(
+            pure_signal, 
+            frequency_spectrum
+        )
+        
+        # Step 5: Match against sovereignty signature if provided
+        sovereignty_match = 0.0
+        if reference_signature:
+            current_freq = await self._extract_fundamental_frequency(pure_signal)
+            sovereignty_match = reference_signature.verify_authenticity(current_freq)
+        
+        # Step 6: Generate recommendations
+        recommendations = self._generate_coherence_recommendations(
+            coherence_score,
+            entropy_layers,
+            sovereignty_match
+        )
+        
+        return CoherenceReport(
+            coherence_score=coherence_score,
+            entropy_layers=entropy_layers,
+            pure_signal=pure_signal,
+            frequency_spectrum=frequency_spectrum,
+            sovereignty_match=sovereignty_match,
+            recommendations=recommendations,
+            timestamp=datetime.utcnow()
+        )
+    
+    async def _detect_entropy_layers(self, audio: np.ndarray) -> List[Dict]:
+        """
+        Identify and catalog different types of entropy in the signal
+        """
+        entropy_layers = []
+        
+        # Layer 1: High-frequency noise
+        high_freq = filtfilt(*self.high_filter, audio)
+        if np.std(high_freq) > 0.01:
+            entropy_layers.append({
+                "type": "high_frequency_noise",
+                "severity": float(np.std(high_freq)),
+                "frequency_range": "4kHz+",
+                "recommendation": "Apply low-pass filter at 4kHz"
+            })
+        
+        # Layer 2: Electrical interference (50/60 Hz)
+        fft_audio = np.abs(fft.rfft(audio))
+        freqs = fft.rfftfreq(len(audio), 1/self.sample_rate)
+        
+        for interference_freq in [50, 60]:
+            idx = np.argmin(np.abs(freqs - interference_freq))
+            if fft_audio[idx] > np.mean(fft_audio) * 3:
+                entropy_layers.append({
+                    "type": f"electrical_interference_{interference_freq}hz",
+                    "severity": float(fft_audio[idx] / np.mean(fft_audio)),
+                    "frequency_range": f"{interference_freq}Hz",
+                    "recommendation": f"Apply notch filter at {interference_freq}Hz"
+                })
+        
+        # Layer 3: Broadband noise
+        noise_floor = np.percentile(fft_audio, 25)
+        signal_peaks = signal.find_peaks(fft_audio, height=noise_floor*3)[0]
+        
+        if len(signal_peaks) < 10:  # Few clear peaks means high noise
+            entropy_layers.append({
+                "type": "broadband_noise",
+                "severity": float(noise_floor / np.max(fft_audio)),
+                "frequency_range": "all",
+                "recommendation": "Apply spectral subtraction"
+            })
+        
+        # Layer 4: Temporal discontinuities (clicks, pops)
+        diff_signal = np.diff(audio)
+        discontinuities = np.where(np.abs(diff_signal) > 3 * np.std(diff_signal))[0]
+        
+        if len(discontinuities) > 0:
+            entropy_layers.append({
+                "type": "temporal_discontinuities",
+                "severity": float(len(discontinuities) / len(audio)),
+                "frequency_range": "transient",
+                "recommendation": "Apply median filter for click removal"
+            })
+        
+        # Layer 5: Phase distortion
+        analytic_signal = hilbert(audio)
+        instantaneous_phase = np.unwrap(np.angle(analytic_signal))
+        phase_derivative = np.diff(instantaneous_phase)
+        phase_variance = np.var(phase_derivative)
+        
+        if phase_variance > 1.0:
+            entropy_layers.append({
+                "type": "phase_distortion",
+                "severity": float(phase_variance),
+                "frequency_range": "phase",
+                "recommendation": "Apply phase correction algorithm"
+            })
+        
+        return entropy_layers
+    
+    async def _strip_entropy(
+        self, 
+        audio: np.ndarray, 
+        entropy_layers: List[Dict]
+    ) -> np.ndarray:
+        """
+        Remove identified entropy layers to reveal pure signal
+        """
+        pure_signal = audio.copy()
+        
+        for layer in entropy_layers:
+            if layer["type"] == "high_frequency_noise":
+                # Apply aggressive low-pass filter
+                pure_signal = filtfilt(*self.band_filter, pure_signal)
+                
+            elif "electrical_interference" in layer["type"]:
+                # Apply targeted notch filter
+                freq = int(layer["type"].split("_")[2].replace("hz", ""))
+                notch = butter(4, [freq-1, freq+1], btype='bandstop', fs=self.sample_rate)
+                pure_signal = filtfilt(*notch, pure_signal)
+                
+            elif layer["type"] == "broadband_noise":
+                # Spectral subtraction
+                pure_signal = await self._spectral_subtraction(pure_signal)
+                
+            elif layer["type"] == "temporal_discontinuities":
+                # Median filter for click removal
+                from scipy.ndimage import median_filter
+                pure_signal = median_filter(pure_signal, size=5)
+                
+            elif layer["type"] == "phase_distortion":
+                # Phase correction using Hilbert transform
+                pure_signal = await self._phase_correction(pure_signal)
+        
+        # Final normalization
+        pure_signal = pure_signal / np.max(np.abs(pure_signal))
+        
+        return pure_signal
+    
+    async def _spectral_subtraction(self, audio: np.ndarray, alpha: float = 2.0) -> np.ndarray:
+        """
+        Advanced spectral subtraction for noise removal
+        """
+        # Estimate noise from quiet portions
+        energy = librosa.feature.rms(y=audio, frame_length=2048, hop_length=512)[0]
+        noise_frames = energy < np.percentile(energy, 20)
+        
+        # Use STFT for spectral processing
+        stft = librosa.stft(audio)
+        magnitude = np.abs(stft)
+        phase = np.angle(stft)
+        
+        # Estimate noise spectrum
+        noise_spectrum = np.median(magnitude[:, noise_frames], axis=1, keepdims=True)
+        
+        # Spectral subtraction
+        clean_magnitude = magnitude - alpha * noise_spectrum
+        clean_magnitude = np.maximum(clean_magnitude, 0.01 * magnitude)  # Avoid over-subtraction
+        
+        # Reconstruct signal
+        clean_stft = clean_magnitude * np.exp(1j * phase)
+        clean_audio = librosa.istft(clean_stft)
+        
+        # Ensure same length as input
+        if len(clean_audio) < len(audio):
+            clean_audio = np.pad(clean_audio, (0, len(audio) - len(clean_audio)))
+        else:
+            clean_audio = clean_audio[:len(audio)]
+        
+        return clean_audio
+    
+    async def _phase_correction(self, audio: np.ndarray) -> np.ndarray:
+        """
+        Correct phase distortion using Hilbert transform
+        """
+        # Get analytic signal
+        analytic = hilbert(audio)
+        magnitude = np.abs(analytic)
+        phase = np.angle(analytic)
+        
+        # Smooth phase to remove distortion
+        from scipy.signal import savgol_filter
+        smooth_phase = savgol_filter(np.unwrap(phase), 51, 3)
+        
+        # Reconstruct with corrected phase
+        corrected = magnitude * np.cos(smooth_phase)
+        
+        return corrected
+    
+    async def _calculate_coherence_score(
+        self, 
+        pure_signal: np.ndarray,
+        frequency_spectrum: np.ndarray
+    ) -> float:
+        """
+        Calculate overall coherence score of the pure signal
+        """
+        # Metric 1: Spectral clarity (peak to noise ratio)
+        peaks = signal.find_peaks(frequency_spectrum, height=np.mean(frequency_spectrum))[0]
+        if len(peaks) > 0:
+            peak_heights = frequency_spectrum[peaks]
+            noise_floor = np.median(frequency_spectrum)
+            spectral_clarity = np.mean(peak_heights) / (noise_floor + 1e-10)
+            spectral_clarity = np.tanh(spectral_clarity / 10)  # Normalize to 0-1
+        else:
+            spectral_clarity = 0.0
+        
+        # Metric 2: Harmonic coherence
+        fundamental_freq = await self._extract_fundamental_frequency(pure_signal)
+        harmonic_coherence = self._check_harmonic_coherence(
+            frequency_spectrum, 
+            fundamental_freq
+        )
+        
+        # Metric 3: Temporal stability (low variation in amplitude envelope)
+        envelope = np.abs(hilbert(pure_signal))
+        temporal_stability = 1.0 - np.std(envelope) / (np.mean(envelope) + 1e-10)
+        temporal_stability = np.clip(temporal_stability, 0, 1)
+        
+        # Metric 4: Golden ratio presence
+        golden_ratio_score = self._check_golden_ratio_harmonics(
+            frequency_spectrum,
+            fundamental_freq
+        )
+        
+        # Weighted combination
+        coherence_score = (
+            0.3 * spectral_clarity +
+            0.3 * harmonic_coherence +
+            0.2 * temporal_stability +
+            0.2 * golden_ratio_score
+        )
+        
+        return coherence_score
+    
+    def _check_harmonic_coherence(
+        self, 
+        spectrum: np.ndarray, 
+        fundamental: float
+    ) -> float:
+        """
+        Check how well harmonics align with expected series
+        """
+        freqs = fft.rfftfreq(len(spectrum) * 2, 1/self.sample_rate)
+        harmonic_score = 0.0
+        
+        for harmonic_num in range(1, 9):
+            expected_freq = fundamental * harmonic_num
+            idx = np.argmin(np.abs(freqs - expected_freq))
+            
+            if idx < len(spectrum):
+                # Check if there's significant energy at this harmonic
+                local_max = np.max(spectrum[max(0, idx-5):min(len(spectrum), idx+5)])
+                harmonic_score += local_max / np.max(spectrum)
+        
+        return harmonic_score / 8
+    
+    def _check_golden_ratio_harmonics(
+        self, 
+        spectrum: np.ndarray, 
+        fundamental: float
+    ) -> float:
+        """
+        Check for golden ratio relationships in frequency spectrum
+        """
+        freqs = fft.rfftfreq(len(spectrum) * 2, 1/self.sample_rate)
+        golden_score = 0.0
+        
+        for power in range(1, 5):
+            golden_freq = fundamental * (self.phi_ratio ** power)
+            idx = np.argmin(np.abs(freqs - golden_freq))
+            
+            if idx < len(spectrum):
+                # Check energy at golden ratio frequencies
+                local_energy = spectrum[idx] / np.max(spectrum)
+                golden_score += local_energy * (1 / power)  # Weight by proximity
+        
+        return np.tanh(golden_score)  # Normalize to 0-1
+    
+    def _generate_coherence_recommendations(
+        self,
+        coherence_score: float,
+        entropy_layers: List[Dict],
+        sovereignty_match: float
+    ) -> List[str]:
+        """
+        Generate actionable recommendations based on analysis
+        """
+        recommendations = []
+        
+        # Coherence-based recommendations
+        if coherence_score < 0.3:
+            recommendations.append(
+                "CRITICAL: Extreme entropy detected. Immediate environment change recommended."
+            )
+        elif coherence_score < 0.6:
+            recommendations.append(
+                "WARNING: High entropy levels. Consider noise reduction and grounding exercises."
+            )
+        elif coherence_score < self.coherence_threshold:
+            recommendations.append(
+                "OPTIMIZE: Approaching coherence threshold. Fine-tune environment for sovereignty."
+            )
+        else:
+            recommendations.append(
+                "SOVEREIGN: Coherence achieved. Maintain current frequency environment."
+            )
+        
+        # Entropy-specific recommendations
+        for layer in entropy_layers[:3]:  # Top 3 issues
+            recommendations.append(f"Address {layer['type']}: {layer['recommendation']}")
+        
+        # Sovereignty signature match
+        if sovereignty_match > 0:
+            if sovereignty_match < 0.5:
+                recommendations.append(
+                    "Signature mismatch detected. Recalibrate sovereignty frequency."
+                )
+            elif sovereignty_match < 0.8:
+                recommendations.append(
+                    "Partial signature match. Strengthen sovereignty practices."
+                )
+            else:
+                recommendations.append(
+                    "Strong signature match. Sovereignty frequency confirmed."
+                )
+        
+        return recommendations
+    
+    async def generate_pure_tone(
+        self,
+        frequency: float,
+        duration: float = 3.0,
+        amplitude: float = 0.5
+    ) -> np.ndarray:
+        """
+        Generate pure tone at specified frequency for calibration
+        """
+        t = np.linspace(0, duration, int(self.sample_rate * duration))
+        tone = amplitude * np.sin(2 * np.pi * frequency * t)
+        
+        # Add golden ratio harmonics for richness
+        for i in range(1, 4):
+            harmonic_freq = frequency * (self.phi_ratio ** i)
+            harmonic_amp = amplitude / (2 ** i)
+            tone += harmonic_amp * np.sin(2 * np.pi * harmonic_freq * t)
+        
+        # Normalize
+        tone = tone / np.max(np.abs(tone))
+        
+        return tone
+    
+    async def save_audio(self, audio: np.ndarray, filepath: str):
+        """
+        Save audio array to file
+        """
+        sf.write(filepath, audio, self.sample_rate)
+    
+    async def load_audio(self, filepath: str) -> np.ndarray:
+        """
+        Load audio from file
+        """
+        audio, sr = librosa.load(filepath, sr=self.sample_rate)
+        return audio
