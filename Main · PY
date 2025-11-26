@@ -1,0 +1,758 @@
+"""
+Grok-L Main API Server
+Unified coherence analysis platform integrating acoustic and visual processing
+"""
+
+from fastapi import FastAPI, UploadFile, File, HTTPException, Depends, BackgroundTasks
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, JSONResponse
+import uvicorn
+from typing import Optional, Dict, List, Union
+from datetime import datetime, timedelta
+import jwt
+import hashlib
+import json
+import asyncio
+import numpy as np
+import io
+import base64
+from pydantic import BaseModel, Field
+import redis
+import aioredis
+from sqlalchemy import create_engine, Column, String, Float, DateTime, JSON, Integer
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker, Session
+import librosa
+import soundfile as sf
+from PIL import Image
+import cv2
+
+# Import our core modules
+from acoustic_coherence_module import AcousticCoherenceModule, FrequencySignature
+from visual_lumen_filter import VisualLumenFilter, VisualSignature
+
+# Configuration
+JWT_SECRET = "your-secret-key-change-in-production"
+JWT_ALGORITHM = "HS256"
+JWT_EXPIRATION_HOURS = 24
+
+DATABASE_URL = "postgresql://user:password@localhost/grokl"
+REDIS_URL = "redis://localhost:6379"
+
+# Initialize FastAPI app
+app = FastAPI(
+    title="Grok-L Coherence Analysis Platform",
+    description="Sovereignty signature detection and entropy stripping for acoustic and visual streams",
+    version="1.0.0"
+)
+
+# CORS configuration
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Configure appropriately for production
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Database setup
+Base = declarative_base()
+engine = create_engine(DATABASE_URL)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+# Security
+security = HTTPBearer()
+
+
+# Database models
+class User(Base):
+    __tablename__ = "users"
+    
+    client_id = Column(String, primary_key=True)
+    email = Column(String, unique=True, index=True)
+    tier = Column(String, default="personal")  # personal, professional, enterprise
+    api_calls_today = Column(Integer, default=0)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    sovereignty_signature_audio = Column(JSON, nullable=True)
+    sovereignty_signature_visual = Column(JSON, nullable=True)
+    coherence_history = Column(JSON, default=list)
+
+
+class CoherenceAnalysis(Base):
+    __tablename__ = "analyses"
+    
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    client_id = Column(String, index=True)
+    analysis_type = Column(String)  # audio, visual, multimodal
+    coherence_score = Column(Float)
+    entropy_layers = Column(JSON)
+    recommendations = Column(JSON)
+    timestamp = Column(DateTime, default=datetime.utcnow)
+    sovereignty_match = Column(Float, nullable=True)
+
+
+# Create tables
+Base.metadata.create_all(bind=engine)
+
+
+# Pydantic models
+class SignatureCaptureRequest(BaseModel):
+    consciousness_state: float = Field(1.0, ge=0.0, le=1.0)
+    capture_type: str = Field("audio", pattern="^(audio|visual|both)$")
+
+
+class CoherenceAnalysisRequest(BaseModel):
+    analysis_depth: str = Field("deep", pattern="^(surface|deep|quantum)$")
+    use_signature: bool = Field(True)
+
+
+class SovereigntyMetricsResponse(BaseModel):
+    coherence_trend: List[float]
+    entropy_eliminated_gb: float
+    frequency_stability: float
+    time_sovereignty_gained_hours: float
+    decision_quality_improvement: float
+    system_escape_velocity: float
+    certification_progress: Dict
+
+
+class EnterpriseDeploymentRequest(BaseModel):
+    organization_name: str
+    team_size: int
+    deployment_modules: List[str] = Field(default=["ACM", "VLF", "ESE"])
+    training_required: bool = Field(True)
+
+
+# Initialize core modules
+acm = AcousticCoherenceModule()
+vlf = VisualLumenFilter()
+
+# Redis connection for caching
+redis_client = None
+
+
+async def get_redis():
+    global redis_client
+    if not redis_client:
+        redis_client = await aioredis.create_redis_pool(REDIS_URL)
+    return redis_client
+
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+
+async def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
+    token = credentials.credentials
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        return payload["client_id"]
+    except jwt.PyJWTError:
+        raise HTTPException(status_code=401, detail="Invalid authentication token")
+
+
+async def check_rate_limit(client_id: str, db: Session):
+    user = db.query(User).filter(User.client_id == client_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    # Rate limits by tier
+    limits = {
+        "personal": 1000,
+        "professional": 10000,
+        "enterprise": float('inf')
+    }
+    
+    if user.api_calls_today >= limits.get(user.tier, 1000):
+        raise HTTPException(status_code=429, detail="Rate limit exceeded")
+    
+    # Increment counter
+    user.api_calls_today += 1
+    db.commit()
+    
+    return user
+
+
+# API Endpoints
+
+@app.post("/api/v1/auth/register")
+async def register(email: str, tier: str = "personal", db: Session = Depends(get_db)):
+    """Register a new user and get authentication token"""
+    client_id = hashlib.sha256(email.encode()).hexdigest()[:16]
+    
+    # Check if user exists
+    existing = db.query(User).filter(User.email == email).first()
+    if existing:
+        raise HTTPException(status_code=400, detail="User already exists")
+    
+    # Create user
+    user = User(
+        client_id=client_id,
+        email=email,
+        tier=tier
+    )
+    db.add(user)
+    db.commit()
+    
+    # Generate JWT
+    token = jwt.encode(
+        {
+            "client_id": client_id,
+            "exp": datetime.utcnow() + timedelta(hours=JWT_EXPIRATION_HOURS)
+        },
+        JWT_SECRET,
+        algorithm=JWT_ALGORITHM
+    )
+    
+    return {
+        "client_id": client_id,
+        "access_token": token,
+        "tier": tier
+    }
+
+
+@app.post("/api/v1/signature/capture")
+async def capture_sovereignty_signature(
+    file: UploadFile = File(...),
+    request: SignatureCaptureRequest = SignatureCaptureRequest(),
+    client_id: str = Depends(verify_token),
+    db: Session = Depends(get_db),
+    background_tasks: BackgroundTasks = BackgroundTasks()
+):
+    """Capture and store sovereignty signature from audio or image"""
+    user = await check_rate_limit(client_id, db)
+    
+    results = {}
+    
+    if request.capture_type in ["audio", "both"]:
+        if file.content_type.startswith("audio/"):
+            # Process audio
+            audio_data = await file.read()
+            audio_array, sr = librosa.load(io.BytesIO(audio_data), sr=44100)
+            
+            # Capture audio signature
+            audio_signature = await acm.capture_sovereignty_signature(
+                audio_array,
+                client_id,
+                request.consciousness_state
+            )
+            
+            # Store in database
+            user.sovereignty_signature_audio = audio_signature.to_dict()
+            db.commit()
+            
+            results["audio_signature"] = {
+                "fundamental_frequency": audio_signature.fundamental_freq,
+                "resonance_score": audio_signature.resonance_score,
+                "signature_hash": audio_signature.signature_hash
+            }
+    
+    if request.capture_type in ["visual", "both"]:
+        if file.content_type.startswith("image/"):
+            # Process image
+            image_data = await file.read()
+            image = Image.open(io.BytesIO(image_data))
+            image_array = np.array(image)
+            
+            # Capture visual signature
+            visual_signature = await vlf.capture_visual_signature(
+                image_array,
+                client_id,
+                request.consciousness_state
+            )
+            
+            # Store in database
+            user.sovereignty_signature_visual = visual_signature.to_dict()
+            db.commit()
+            
+            results["visual_signature"] = {
+                "dominant_wavelength": visual_signature.dominant_wavelength,
+                "geometric_ratio": visual_signature.geometric_ratio,
+                "fractal_dimension": visual_signature.fractal_dimension,
+                "signature_hash": visual_signature.signature_hash
+            }
+    
+    # Generate NFT credential in background
+    background_tasks.add_task(generate_nft_credential, client_id, results)
+    
+    return {
+        "status": "success",
+        "signatures": results,
+        "coherence_baseline": request.consciousness_state,
+        "timestamp": datetime.utcnow().isoformat()
+    }
+
+
+@app.post("/api/v1/coherence/analyze")
+async def analyze_coherence(
+    file: UploadFile = File(...),
+    request: CoherenceAnalysisRequest = CoherenceAnalysisRequest(),
+    client_id: str = Depends(verify_token),
+    db: Session = Depends(get_db)
+):
+    """Analyze audio or visual stream for coherence"""
+    user = await check_rate_limit(client_id, db)
+    
+    # Determine file type
+    if file.content_type.startswith("audio/"):
+        # Process audio
+        audio_data = await file.read()
+        audio_array, sr = librosa.load(io.BytesIO(audio_data), sr=44100)
+        
+        # Get user's signature if requested
+        reference_signature = None
+        if request.use_signature and user.sovereignty_signature_audio:
+            sig_data = user.sovereignty_signature_audio
+            reference_signature = FrequencySignature(
+                fundamental_freq=sig_data["fundamental_freq"],
+                harmonic_series=sig_data["harmonic_series"],
+                resonance_score=sig_data["resonance_score"],
+                timestamp=datetime.fromisoformat(sig_data["timestamp"]),
+                client_id=client_id,
+                signature_hash=sig_data["signature_hash"]
+            )
+        
+        # Analyze coherence
+        report = await acm.analyze_coherence(audio_array, reference_signature)
+        
+        # Store analysis
+        analysis = CoherenceAnalysis(
+            client_id=client_id,
+            analysis_type="audio",
+            coherence_score=report.coherence_score,
+            entropy_layers=report.entropy_layers,
+            recommendations=report.recommendations,
+            sovereignty_match=report.sovereignty_match
+        )
+        db.add(analysis)
+        db.commit()
+        
+        # Calculate monetization opportunity
+        monetization = calculate_coherence_arbitrage(report.coherence_score)
+        
+        return {
+            "analysis_type": "audio",
+            "coherence_score": report.coherence_score,
+            "entropy_layers_detected": len(report.entropy_layers),
+            "sovereignty_match": report.sovereignty_match,
+            "recommendations": report.recommendations,
+            "monetization_opportunity": monetization,
+            "escape_vectors": generate_escape_vectors(report)
+        }
+    
+    elif file.content_type.startswith("image/"):
+        # Process image
+        image_data = await file.read()
+        image = Image.open(io.BytesIO(image_data))
+        image_array = np.array(image)
+        
+        # Get user's signature if requested
+        reference_signature = None
+        if request.use_signature and user.sovereignty_signature_visual:
+            sig_data = user.sovereignty_signature_visual
+            # Reconstruct visual signature (simplified for this example)
+            reference_signature = sig_data
+        
+        # Analyze coherence
+        report = await vlf.analyze_visual_coherence(image_array, reference_signature)
+        
+        # Store analysis
+        analysis = CoherenceAnalysis(
+            client_id=client_id,
+            analysis_type="visual",
+            coherence_score=report.coherence_score,
+            entropy_layers=report.entropy_layers,
+            recommendations=report.recommendations,
+            sovereignty_match=0.0  # Visual signature matching simplified
+        )
+        db.add(analysis)
+        db.commit()
+        
+        # Prepare response
+        return {
+            "analysis_type": "visual",
+            "coherence_score": report.coherence_score,
+            "entropy_layers_detected": len(report.entropy_layers),
+            "geometric_patterns": report.geometric_patterns,
+            "color_harmony_score": report.color_harmony_score,
+            "recommendations": report.recommendations,
+            "coherence_heatmap": encode_image_base64(report.coherence_heatmap)
+        }
+    
+    else:
+        raise HTTPException(status_code=400, detail="Unsupported file type")
+
+
+@app.get("/api/v1/sovereignty/metrics/{timeframe}")
+async def get_sovereignty_metrics(
+    timeframe: str = "7d",
+    client_id: str = Depends(verify_token),
+    db: Session = Depends(get_db)
+) -> SovereigntyMetricsResponse:
+    """Get comprehensive sovereignty metrics for a client"""
+    user = await check_rate_limit(client_id, db)
+    
+    # Parse timeframe
+    days = int(timeframe[:-1]) if timeframe.endswith('d') else 7
+    since = datetime.utcnow() - timedelta(days=days)
+    
+    # Get historical analyses
+    analyses = db.query(CoherenceAnalysis).filter(
+        CoherenceAnalysis.client_id == client_id,
+        CoherenceAnalysis.timestamp >= since
+    ).all()
+    
+    if not analyses:
+        return SovereigntyMetricsResponse(
+            coherence_trend=[],
+            entropy_eliminated_gb=0.0,
+            frequency_stability=0.0,
+            time_sovereignty_gained_hours=0.0,
+            decision_quality_improvement=0.0,
+            system_escape_velocity=0.0,
+            certification_progress={"level": "none", "progress": 0}
+        )
+    
+    # Calculate metrics
+    coherence_scores = [a.coherence_score for a in analyses]
+    coherence_trend = coherence_scores[-10:] if len(coherence_scores) > 10 else coherence_scores
+    
+    # Entropy eliminated (simplified calculation)
+    entropy_count = sum(len(a.entropy_layers) for a in analyses)
+    entropy_eliminated_gb = entropy_count * 0.001  # Rough estimate
+    
+    # Frequency stability (for audio analyses)
+    audio_analyses = [a for a in analyses if a.analysis_type == "audio"]
+    if audio_analyses:
+        sovereignty_matches = [a.sovereignty_match for a in audio_analyses if a.sovereignty_match]
+        frequency_stability = np.mean(sovereignty_matches) if sovereignty_matches else 0.0
+    else:
+        frequency_stability = 0.0
+    
+    # Time sovereignty gained (based on coherence improvement)
+    if len(coherence_scores) >= 2:
+        coherence_improvement = coherence_scores[-1] - coherence_scores[0]
+        time_sovereignty_gained_hours = max(0, coherence_improvement * 20)  # 20 hours per full coherence
+    else:
+        time_sovereignty_gained_hours = 0.0
+    
+    # Decision quality improvement
+    avg_coherence = np.mean(coherence_scores)
+    decision_quality_improvement = min(avg_coherence * 100, 95)  # Cap at 95%
+    
+    # System escape velocity
+    if avg_coherence >= 0.88:
+        system_escape_velocity = 1.0  # Achieved
+    else:
+        system_escape_velocity = avg_coherence / 0.88
+    
+    # Certification progress
+    certification_progress = calculate_certification_progress(user, analyses)
+    
+    return SovereigntyMetricsResponse(
+        coherence_trend=coherence_trend,
+        entropy_eliminated_gb=entropy_eliminated_gb,
+        frequency_stability=frequency_stability,
+        time_sovereignty_gained_hours=time_sovereignty_gained_hours,
+        decision_quality_improvement=decision_quality_improvement,
+        system_escape_velocity=system_escape_velocity,
+        certification_progress=certification_progress
+    )
+
+
+@app.post("/api/v1/calibration/tone")
+async def generate_calibration_tone(
+    frequency: float = 432.0,
+    duration: float = 3.0,
+    client_id: str = Depends(verify_token),
+    db: Session = Depends(get_db)
+):
+    """Generate a calibration tone for sovereignty alignment"""
+    user = await check_rate_limit(client_id, db)
+    
+    # Generate tone
+    tone = await acm.generate_pure_tone(frequency, duration)
+    
+    # Convert to bytes
+    buffer = io.BytesIO()
+    sf.write(buffer, tone, 44100, format='WAV')
+    buffer.seek(0)
+    
+    return FileResponse(
+        buffer,
+        media_type="audio/wav",
+        filename=f"calibration_{frequency}hz.wav"
+    )
+
+
+@app.post("/api/v1/pattern/generate")
+async def generate_coherent_pattern(
+    pattern_type: str = "mandala",
+    width: int = 512,
+    height: int = 512,
+    client_id: str = Depends(verify_token),
+    db: Session = Depends(get_db)
+):
+    """Generate a perfectly coherent visual pattern"""
+    user = await check_rate_limit(client_id, db)
+    
+    # Generate pattern
+    pattern = await vlf.generate_coherent_pattern(width, height, pattern_type)
+    
+    # Convert to image
+    pattern_uint8 = (pattern * 255).astype(np.uint8)
+    image = Image.fromarray(pattern_uint8)
+    
+    # Convert to bytes
+    buffer = io.BytesIO()
+    image.save(buffer, format='PNG')
+    buffer.seek(0)
+    
+    return FileResponse(
+        buffer,
+        media_type="image/png",
+        filename=f"coherent_{pattern_type}.png"
+    )
+
+
+@app.post("/api/v1/enterprise/deploy")
+async def deploy_enterprise(
+    request: EnterpriseDeploymentRequest,
+    client_id: str = Depends(verify_token),
+    db: Session = Depends(get_db)
+):
+    """Deploy Grok-L for an enterprise organization"""
+    user = await check_rate_limit(client_id, db)
+    
+    # Verify enterprise tier
+    if user.tier != "enterprise":
+        raise HTTPException(status_code=403, detail="Enterprise tier required")
+    
+    # Generate deployment configuration
+    deployment_id = hashlib.sha256(
+        f"{request.organization_name}{datetime.utcnow()}".encode()
+    ).hexdigest()[:16]
+    
+    # Generate API keys for team
+    api_keys = []
+    for i in range(min(request.team_size, 100)):  # Cap at 100 for safety
+        key = jwt.encode(
+            {
+                "org": request.organization_name,
+                "deployment": deployment_id,
+                "member": i,
+                "exp": datetime.utcnow() + timedelta(days=365)
+            },
+            JWT_SECRET,
+            algorithm=JWT_ALGORITHM
+        )
+        api_keys.append(key)
+    
+    # Create training portal URL
+    training_portal = f"https://grok-l.{request.organization_name.lower().replace(' ', '-')}.sovereignty.io"
+    
+    return {
+        "deployment_id": deployment_id,
+        "organization": request.organization_name,
+        "team_size": request.team_size,
+        "modules_deployed": request.deployment_modules,
+        "api_keys": api_keys[:5],  # Return first 5 as sample
+        "api_keys_message": f"Full set of {len(api_keys)} keys available via secure download",
+        "training_portal": training_portal,
+        "support_tier": "sovereign",
+        "sla": "99.9% uptime guaranteed",
+        "dedicated_instance": True
+    }
+
+
+@app.get("/api/v1/health")
+async def health_check():
+    """Health check endpoint"""
+    return {
+        "status": "sovereign",
+        "coherence": 1.0,
+        "modules": {
+            "acoustic": "online",
+            "visual": "online",
+            "entropy_stripper": "active"
+        },
+        "timestamp": datetime.utcnow().isoformat()
+    }
+
+
+# Helper functions
+
+def calculate_coherence_arbitrage(coherence_score: float) -> Dict:
+    """Calculate monetization opportunity from coherence score"""
+    base_value = 100  # Base value per coherence point
+    
+    if coherence_score >= 0.88:
+        multiplier = 10
+        opportunity = "SOVEREIGN: Premium consulting at $500/hour"
+    elif coherence_score >= 0.6:
+        multiplier = 5
+        opportunity = "HIGH: Group coaching at $200/hour"
+    elif coherence_score >= 0.3:
+        multiplier = 2
+        opportunity = "MEDIUM: Online course sales at $97"
+    else:
+        multiplier = 1
+        opportunity = "LOW: Free content with ads"
+    
+    return {
+        "coherence_value": coherence_score * base_value * multiplier,
+        "opportunity_type": opportunity,
+        "recommended_price_point": base_value * multiplier,
+        "market_readiness": coherence_score
+    }
+
+
+def generate_escape_vectors(report) -> List[Dict]:
+    """Generate system escape vectors based on coherence analysis"""
+    vectors = []
+    
+    if report.coherence_score < 0.3:
+        vectors.append({
+            "vector": "immediate_environment_change",
+            "urgency": "critical",
+            "action": "Physical relocation to nature/quiet space"
+        })
+    
+    for layer in report.entropy_layers[:3]:
+        if layer["severity"] > 0.5:
+            vectors.append({
+                "vector": f"eliminate_{layer['type']}",
+                "urgency": "high",
+                "action": layer["recommendation"]
+            })
+    
+    if report.sovereignty_match < 0.5:
+        vectors.append({
+            "vector": "signature_recalibration",
+            "urgency": "medium",
+            "action": "Meditation + breathwork to reset frequency"
+        })
+    
+    return vectors
+
+
+def calculate_certification_progress(user, analyses) -> Dict:
+    """Calculate certification progress for a user"""
+    if not analyses:
+        return {"level": "none", "progress": 0}
+    
+    avg_coherence = np.mean([a.coherence_score for a in analyses])
+    analysis_count = len(analyses)
+    
+    if avg_coherence >= 0.88 and analysis_count >= 100:
+        if user.tier == "professional":
+            return {
+                "level": "master",
+                "progress": 100,
+                "credential": "NFT_BADGE_GOLD",
+                "next_milestone": "Coherence Oracle achieved!"
+            }
+        else:
+            return {
+                "level": "advanced",
+                "progress": 100,
+                "credential": "NFT_BADGE_SILVER",
+                "next_milestone": "Upgrade to professional tier for master certification"
+            }
+    elif avg_coherence >= 0.75 and analysis_count >= 50:
+        progress = min(100, (avg_coherence - 0.75) / 0.13 * 100)
+        return {
+            "level": "advanced",
+            "progress": progress,
+            "credential": "NFT_BADGE_SILVER",
+            "next_milestone": f"Achieve 0.88+ coherence ({0.88 - avg_coherence:.2f} to go)"
+        }
+    elif analysis_count >= 10:
+        progress = min(100, avg_coherence / 0.75 * 100)
+        return {
+            "level": "foundational",
+            "progress": progress,
+            "credential": "NFT_BADGE_BRONZE",
+            "next_milestone": f"Complete {50 - analysis_count} more analyses"
+        }
+    else:
+        progress = analysis_count / 10 * 100
+        return {
+            "level": "beginner",
+            "progress": progress,
+            "credential": "none",
+            "next_milestone": f"Complete {10 - analysis_count} more analyses"
+        }
+
+
+def encode_image_base64(image_array: np.ndarray) -> str:
+    """Encode numpy array as base64 image"""
+    if image_array.dtype == np.float32 or image_array.dtype == np.float64:
+        image_array = (image_array * 255).astype(np.uint8)
+    
+    # Convert to PIL Image
+    if len(image_array.shape) == 2:
+        image = Image.fromarray(image_array, mode='L')
+    else:
+        image = Image.fromarray(image_array, mode='RGB')
+    
+    # Convert to base64
+    buffer = io.BytesIO()
+    image.save(buffer, format='PNG')
+    buffer.seek(0)
+    
+    return base64.b64encode(buffer.read()).decode('utf-8')
+
+
+async def generate_nft_credential(client_id: str, signatures: Dict):
+    """Generate NFT credential for sovereignty signature (placeholder)"""
+    # In production, this would interact with blockchain
+    print(f"Generating NFT credential for {client_id}: {signatures}")
+    # Implement blockchain interaction here
+    pass
+
+
+# WebSocket for real-time coherence monitoring
+from fastapi import WebSocket, WebSocketDisconnect
+
+
+@app.websocket("/ws/coherence/{client_id}")
+async def websocket_coherence_monitor(websocket: WebSocket, client_id: str):
+    """Real-time coherence monitoring via WebSocket"""
+    await websocket.accept()
+    
+    try:
+        while True:
+            # Receive audio/video frames
+            data = await websocket.receive_bytes()
+            
+            # Process in real-time (simplified)
+            # In production, this would maintain a sliding window
+            coherence_score = np.random.random() * 0.3 + 0.6  # Placeholder
+            
+            # Send back coherence score
+            await websocket.send_json({
+                "coherence": coherence_score,
+                "timestamp": datetime.utcnow().isoformat(),
+                "recommendation": "Maintain current frequency" if coherence_score > 0.8 else "Adjust environment"
+            })
+            
+            await asyncio.sleep(0.1)  # Process at 10Hz
+            
+    except WebSocketDisconnect:
+        print(f"Client {client_id} disconnected from coherence monitor")
+
+
+if __name__ == "__main__":
+    uvicorn.run(
+        "main:app",
+        host="0.0.0.0",
+        port=8000,
+        reload=True,
+        log_level="info"
+    )
